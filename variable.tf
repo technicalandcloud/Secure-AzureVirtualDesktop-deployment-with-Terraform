@@ -116,9 +116,9 @@ variable "msi_id" {
 }
 
 variable "avd_users" {
-  description = "AVD users"
+  description = "Account access AVD users"
   default = [
-    "nicolas@nicolascloud.onmicrosoft.com"
+    "user@cloud.com"
   ]
 }
 
