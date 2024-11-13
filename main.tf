@@ -1,8 +1,39 @@
+#Creation Resource Group
 resource "azurerm_resource_group" "rg" {
   name     = var.rg
   location = var.resource_group_location
 }
 
+# Récupération des définitions de rôle spécifiques pour AVD
+data "azurerm_role_definition" "role" {
+  name = "Desktop Virtualization User"
+}
+
+data "azurerm_role_definition" "virtual_Machine_Administrator_Login" {
+  name = "Virtual Machine Administrator Login"
+}
+
+data "azurerm_role_definition" "virtual_Machine_User_Login" {
+  name = "Virtual Machine User Login"
+}
+
+# Récupération de l'utilisateur AAD spécifié par `user_principal_name`
+data "azuread_user" "avd_user" { 
+  user_principal_name = "Account"    
+}
+# Création Groupe Azure AD pour les utilisateurs AVD
+resource "azuread_group" "avd_users_group" {
+  display_name     = var.aad_group_name_AVD
+  security_enabled = true
+}
+
+# Ajoute chaque utilisateur de `avd_users` au groupe `avd_users_group`
+resource "azuread_group_member" "avd_users_group_membership" {
+  group_object_id = azuread_group.avd_users_group.object_id
+  member_object_id = data.azuread_user.avd_user.object_id
+}
+
+#Creation VNET
 resource "azurerm_virtual_network" "VNet" {
   name                = "Vnet"
   address_space       = ["10.0.0.0/16"]
@@ -17,6 +48,8 @@ resource "azurerm_subnet" "Subnet" {
   virtual_network_name = azurerm_virtual_network.VNet.name
   address_prefixes     = ["10.0.1.0/24"]
 }
+
+#Creation NSG
 resource "azurerm_network_security_group" "nsg" {
   name                = "${var.prefix}-NSG"
   location            = var.deploy_location
@@ -35,6 +68,7 @@ resource "azurerm_network_security_group" "nsg" {
   depends_on = [azurerm_resource_group.rg]
 }
 
+#Associé NSG au SUBNET
 resource "azurerm_subnet_network_security_group_association" "nsg_assoc" {
   subnet_id                 = azurerm_subnet.Subnet.id
   network_security_group_id = azurerm_network_security_group.nsg.id
@@ -80,7 +114,7 @@ resource "azurerm_virtual_desktop_application_group" "dag" {
   depends_on          = [azurerm_virtual_desktop_host_pool.hostpool, azurerm_virtual_desktop_workspace.workspace]
 }
 
-# Associate Workspace and DAG
+# Associé Workspace and DAG
 resource "azurerm_virtual_desktop_workspace_application_group_association" "ws-dag" {
   application_group_id = azurerm_virtual_desktop_application_group.dag.id
   workspace_id         = azurerm_virtual_desktop_workspace.workspace.id
@@ -89,6 +123,7 @@ locals {
   registration_token = azurerm_virtual_desktop_host_pool_registration_info.registrationinfo.token
 }
 
+#Creation NIC
 resource "azurerm_network_interface" "avd_vm_nic" {
   count               = var.rdsh_count
   name                = "${var.prefix}-${count.index + 1}-nic"
@@ -116,7 +151,7 @@ resource "random_string" "azurerm_key_vault_name" {
 locals {
   current_user_id = coalesce(var.msi_id, data.azurerm_client_config.current.object_id)
 }
-
+#Creation KeyVault
  resource "azurerm_key_vault" "vault" {
   name                       = coalesce(var.vault_name, "kv-${random_string.azurerm_key_vault_name.result}")
   location                   = azurerm_resource_group.rg.location
@@ -126,7 +161,7 @@ locals {
   soft_delete_retention_days = 7
   enabled_for_disk_encryption = true
   purge_protection_enabled    = true
-
+#Autorisation key
   access_policy {
     tenant_id = data.azurerm_client_config.current.tenant_id
     object_id = local.current_user_id
@@ -135,6 +170,7 @@ locals {
     secret_permissions = var.secret_permissions
   }
 }
+#Creation Key Random
 resource "random_string" "azurerm_key_vault_key_name" {
   length  = 13
   lower   = true
@@ -149,7 +185,7 @@ resource "azurerm_key_vault_key" "key" {
   key_type     = var.key_type
   key_size     = var.key_size
   key_opts     = var.key_ops
-
+#Creation des Rotations Policy
   rotation_policy {
     automatic {
       time_before_expiry = "P30D"
@@ -160,7 +196,7 @@ resource "azurerm_key_vault_key" "key" {
   }
 }
 
-
+#Creation des Disk Encryption Set
  resource "azurerm_disk_encryption_set" "example" {
       name                = "encryptiondisk"
       resource_group_name = azurerm_resource_group.rg.name
@@ -174,7 +210,8 @@ resource "azurerm_key_vault_key" "key" {
       depends_on = [azurerm_key_vault_key.key]
     }
 
-
+    
+#Attribution des permissions
   resource "azurerm_key_vault_access_policy" "example-disk" {
   key_vault_id = azurerm_key_vault.vault.id
 
@@ -196,13 +233,18 @@ resource "azurerm_key_vault_key" "key" {
   ]
 
 }
-    
+
+  #Attribution Role RBAC
     resource "azurerm_role_assignment" "example-disk" {
       scope                = azurerm_key_vault.vault.id
       role_definition_name = "Key Vault Administrator"
       principal_id         = azurerm_disk_encryption_set.example.identity.0.principal_id
     }
 
+
+
+
+#Creation d'un random password pour compte adm
 resource "random_password" "password" {
   count = var.rdsh_count
   length           = 16
@@ -216,7 +258,7 @@ resource "azurerm_key_vault_secret" "passwordadm" {
   key_vault_id = azurerm_key_vault.vault.id
   value        = random_password.password[count.index].result
 }
-
+#Creation AVD VM
 resource "azurerm_windows_virtual_machine" "avd_vm" {
   count                 = var.rdsh_count
   name                  = "${var.prefix}-${count.index + 1}"
@@ -254,7 +296,7 @@ resource "azurerm_windows_virtual_machine" "avd_vm" {
   ]
   
 }
-
+#Creation Extension AAD Login & DSC
 resource "azurerm_virtual_machine_extension" "aad_login" {
   count                      = var.rdsh_count
   name                       = "${var.prefix}-${count.index + 1}-aadLogin"
@@ -264,6 +306,7 @@ resource "azurerm_virtual_machine_extension" "aad_login" {
   type_handler_version       = "1.0"
   auto_upgrade_minor_version = true
 }
+
 resource "azurerm_virtual_machine_extension" "vmext_dsc" {
   count                      = var.rdsh_count
   name                       = "${var.prefix}${count.index + 1}-avd_dsc"
@@ -296,32 +339,8 @@ PROTECTED_SETTINGS
     azurerm_virtual_desktop_host_pool.hostpool
   ]
 }
-data "azuread_user" "aad_user" {
-  for_each            = toset(var.avd_users)
-  user_principal_name = format("%s", each.key)
-}
 
-data "azurerm_role_definition" "role" { # access an existing built-in role
-  name = "Desktop Virtualization User"
-}
-
-resource "azuread_group" "aad_group" {
-  display_name     = var.aad_group_name_AVD
-  security_enabled = true
-}
-
-resource "azuread_group_member" "aad_group_member" {
-  for_each         = data.azuread_user.aad_user
-  group_object_id  = azuread_group.aad_group.id
-  member_object_id = each.value["id"]
-}
-
-resource "azurerm_role_assignment" "role" {
-  scope              = azurerm_virtual_desktop_application_group.dag.id
-  role_definition_id = data.azurerm_role_definition.role.id
-  principal_id       = azuread_group.aad_group.id
-}
-
+#Attribtion des permissions Virtual Machine Administrator Login & Virtual Machine User Login
 resource "azuread_group" "aad_group_virtual_Machine_Administrator_Login" {
   display_name     = var.aad_group_virtual_Machine_Administrator_Login
   security_enabled = true
@@ -332,8 +351,15 @@ resource "azuread_group" "aad_group_virtual_Machine_User_Login" {
   security_enabled = true
 }
 
-data "azurerm_role_definition" "virtual_Machine_Administrator_Login" { # access an existing built-in role
-  name = "Virtual Machine Administrator Login"
+resource "azuread_group_member" "avd_users_group_membership_Virtual_Machine_User_Login" {
+  group_object_id = azuread_group.aad_group_virtual_Machine_User_Login.object_id
+  member_object_id = data.azuread_user.avd_user.object_id
+}
+
+resource "azurerm_role_assignment" "role" {
+  scope              = azurerm_virtual_desktop_application_group.dag.id
+  role_definition_id = data.azurerm_role_definition.role.id
+  principal_id       = azuread_group.avd_users_group.object_id
 }
 
 resource "azurerm_role_assignment" "role_virtual_Machine_Administrator_Login" {
@@ -342,9 +368,7 @@ resource "azurerm_role_assignment" "role_virtual_Machine_Administrator_Login" {
   principal_id       = azuread_group.aad_group_virtual_Machine_Administrator_Login.object_id
 }
 
-data "azurerm_role_definition" "virtual_Machine_User_Login" { # access an existing built-in role
-  name = "Virtual Machine User Login"
-}
+
 
 resource "azurerm_role_assignment" "role_virtual_Machine_User_Login" {
   scope              = azurerm_resource_group.rg.id
